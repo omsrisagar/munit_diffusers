@@ -52,7 +52,7 @@ class SchedulerMixin:
     _compatibles = []
     has_compatibles = True
 
-    @classmethod
+    @classmethod # don't need to create objects/instances to call the below method. It is at class level.
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Dict[str, Any] = None,
