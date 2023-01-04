@@ -61,7 +61,7 @@ class AutoencoderKLOutput(BaseOutput):
             `DiagonalGaussianDistribution` allows for sampling latents from the distribution.
     """
 
-    latent_dist: "DiagonalGaussianDistribution"
+    latent_dist: "DiagonalGaussianDistribution" # this is the type of latent_dist; in general age: int or name: str
 
 
 class Encoder(nn.Module):

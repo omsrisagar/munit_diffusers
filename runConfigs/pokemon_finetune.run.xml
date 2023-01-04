@@ -1,0 +1,24 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="pokemon_finetune" type="PythonConfigurationType" factoryName="Python">
+    <module name="munit_diffusers" />
+    <option name="INTERPRETER_OPTIONS" value="" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="PYTHONUNBUFFERED" value="1" />
+    </envs>
+    <option name="SDK_HOME" value="" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/examples/text_to_image" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+    <option name="SCRIPT_NAME" value="accelerate.commands.launch" />
+    <option name="PARAMETERS" value="train_text_to_image.py --pretrained_model_name_or_path=&quot;CompVis/stable-diffusion-v1-4&quot; --dataset_name=&quot;lambdalabs/pokemon-blip-captions&quot; --use_ema --resolution=512 --center_crop --random_flip --train_batch_size=1 --gradient_accumulation_steps=4 --gradient_checkpointing --mixed_precision=&quot;fp16&quot; --max_train_steps=15000 --learning_rate=1e-05 --max_grad_norm=1 --lr_scheduler=&quot;constant&quot; --lr_warmup_steps=0 --output_dir=&quot;sd-pokemon-model&quot;" />
+    <option name="SHOW_COMMAND_LINE" value="true" />
+    <option name="EMULATE_TERMINAL" value="false" />
+    <option name="MODULE_MODE" value="true" />
+    <option name="REDIRECT_INPUT" value="false" />
+    <option name="INPUT_FILE" value="" />
+    <method v="2" />
+  </configuration>
+</component>

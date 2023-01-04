@@ -640,7 +640,7 @@ def main():
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # Get the text embedding for conditioning
+                # Get the text embedding for conditioning # emb size is 768
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
                 # Get the target for loss depending on the prediction type
@@ -669,7 +669,7 @@ def main():
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
-                if args.use_ema:
+                if args.use_ema: # at this point memory is released for gradient_accumulation_steps
                     ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
