@@ -42,7 +42,8 @@ matplotlib.use('TkAgg')
 import matplotlib.pyplot as plt
 
 
-from diffusers import StableDiffusionImg2ImgPipeline
+# from diffusers import StableDiffusionImg2ImgPipeline
+from diffusers import StableDiffusionDepth2ImgPipeline
 
 # import pydevd_pycharm
 # pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True,
@@ -51,10 +52,10 @@ from diffusers import StableDiffusionImg2ImgPipeline
 
 """Load the pipeline"""
 
-device = "cuda"
-model_path = "CompVis/stable-diffusion-v1-4"
+device = "cuda:2"
+model_path = "stabilityai/stable-diffusion-2-depth"
 
-pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+pipe = StableDiffusionDepth2ImgPipeline.from_pretrained(
     model_path,
     revision="fp16", 
     torch_dtype=torch.float16,
@@ -68,27 +69,31 @@ import requests
 from io import BytesIO
 from PIL import Image
 
-url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+# url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+url = "http://images.cocodataset.org/val2017/000000039769.jpg"
 
-response = requests.get(url)
-init_img = Image.open(BytesIO(response.content)).convert("RGB")
-init_img = init_img.resize((768, 512))
+# response = requests.get(url)
+# init_img = Image.open(BytesIO(response.content)).convert("RGB")
+# init_img = init_img.resize((768, 512))
 # init_img
 
+init_img = Image.open(requests.get(url, stream=True).raw)
 """Define the prompt and run the pipeline."""
 
-prompt = "A fantasy landscape, trending on artstation"
+# prompt = "A fantasy landscape, trending on artstation"
+prompt = "two tigers"
+n_prompt = "bad, deformed, ugly, bad anotomy"
 
 """Here, `strength` is a value between 0.0 and 1.0, that controls the amount of noise that is added to the input image. Values that approach 1.0 allow for lots of variations but will also produce images that are not semantically consistent with the input."""
 
 generator = torch.Generator(device=device).manual_seed(1024)
 with autocast("cuda"):
-    image = pipe(prompt=prompt, init_image=init_img, strength=0.75, guidance_scale=7.5, generator=generator).images[0]
+    image = pipe(prompt=prompt, image=init_img, negative_prompt=n_prompt, strength=0.75, guidance_scale=7.5, generator=generator).images[0]
 
 # image
 
 with autocast("cuda"):
-    image = pipe(prompt=prompt, init_image=init_img, strength=0.5, guidance_scale=7.5, generator=generator).images[0]
+    image = pipe(prompt=prompt, image=init_img, negative_prompt=n_prompt, strength=0.5, guidance_scale=7.5, generator=generator).images[0]
 
 # image
 
@@ -104,6 +109,6 @@ pipe.scheduler = lms
 
 generator = torch.Generator(device=device).manual_seed(1024)
 with autocast("cuda"):
-    image = pipe(prompt=prompt, init_image=init_img, strength=0.75, guidance_scale=7.5, generator=generator).images[0]
+    image = pipe(prompt=prompt, image=init_img, negative_prompt=n_prompt, strength=0.75, guidance_scale=7.5, generator=generator).images[0]
 
 image

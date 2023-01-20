@@ -1,0 +1,17 @@
+steps to create obayashi environment for stable diffusion
+conda install pytorch torchvision torchaudio pytorch-cuda=11.7 xformers -c pytorch -c nvidia -c xformers/label/dev -c nvidia/label/cuda-11.7.1
+conda install accelerate datasets transformers -c huggingface -c conda-forge
+conda install ipython matplotlib -c conda-forge -c anaconda
+pip install -e . (from munit_differs directory)
+pip install tensorboard bitsandbytes triton==2.0.0.dev20221120 pyre-extensions==0.0.23 einops pydevd-pycharm~=223.8214.51 ipykernel
+
+
+
+
+Important links:
+For installing xformers: https://github.com/facebookresearch/xformers/issues/390
+For installing triton with xformers: https://huggingface.co/stabilityai/stable-diffusion-x4-upscaler/discussions/2 
+
+Issues:
+With xformers installed and mixed precision set to fp16 and use_8bit_adam set to True still giving CUDA Error: Invalid Argument. So uninstalled xformers for now.
+In Pycharm debug mode, accelerate is getting stuck (while creating Acceletor object in the code) when more than 1 GPU is specified.
