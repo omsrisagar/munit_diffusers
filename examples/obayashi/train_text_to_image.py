@@ -23,6 +23,9 @@ from huggingface_hub import HfFolder, Repository, whoami
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
+from image_datasets_sketch import load_data_sketch
+from create_metadata import _list_image_files_recursively
+import dist_util, logger
 
 # import pydevd_pycharm
 # pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True,
@@ -78,6 +81,14 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=None,
+        help=(
+            "Path to folder with images and metadata.jsonl"
+        ),
+    )
+    parser.add_argument(
         "--image_column", type=str, default="image", help="The column of the dataset containing an image."
     )
     parser.add_argument(
@@ -129,6 +140,18 @@ def parse_args():
     )
     parser.add_argument(
         "--train_batch_size", type=int, default=16, help="Batch size (per device) for the training dataloader."
+    )
+    parser.add_argument(
+        "--super_res", type=int, default=None, help="Low resolution value in case of upsampling"
+    )
+    parser.add_argument(
+        "--uncond_p", type=float, default=0.2, help="Percentage of time to train the unconditional model"
+    )
+    parser.add_argument(
+        "--train_ratio", type=float, default=0.8, help="Fraction of data to use for training. Rest used for validation"
+    )
+    parser.add_argument(
+        "--mode", type=str, default='edge', help="Legacy param carried from PITI which works on edges, masks, depths"
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -261,9 +284,9 @@ def get_full_repo_name(model_id: str, organization: Optional[str] = None, token:
         return f"{organization}/{model_id}"
 
 
-dataset_name_mapping = {
-    "lambdalabs/pokemon-blip-captions": ("image", "text"),
-}
+# dataset_name_mapping = {
+#     "lambdalabs/pokemon-blip-captions": ("image", "text"),
+# }
 
 
 # Adapted from torch-ema https://github.com/fadel/pytorch_ema/blob/master/torch_ema/ema.py#L14
@@ -333,41 +356,105 @@ def main():
     args = parse_args()
     logging_dir = os.path.join(args.output_dir, args.logging_dir)
 
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
-        logging_dir=logging_dir,
-    )
+    dist_util.setup_dist()
 
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
+    if dist.get_rank() == 0:
+        logger.save_args(options)
+
+    # accelerator = Accelerator(
+    #     gradient_accumulation_steps=args.gradient_accumulation_steps,
+    #     mixed_precision=args.mixed_precision,
+    #     log_with=args.report_to,
+    #     logging_dir=logging_dir,
+    # )
+
+    # logging.basicConfig(
+    #     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    #     datefmt="%m/%d/%Y %H:%M:%S",
+    #     level=logging.INFO,
+    # )
 
     # If passed along, set the training seed now.
     if args.seed is not None:
         set_seed(args.seed)
 
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
+    ##### scratch #####
+    if args.model_path:
+        print('loading decoder')
+        model_ckpt = dist_util.load_state_dict(args.model_path, map_location="cpu")
 
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+        for k in list(model_ckpt.keys()):
+            if k.startswith("transformer") and 'transformer_proj' not in k:  # total 16 transformer.resblocks
+                # print(f"Removing key {k} from pretrained checkpoint") # because we are loading only decoder here, # so need to remove all encoder params
+                del model_ckpt[k]
+            if k.startswith("padding_embedding") or k.startswith("positional_embedding") or k.startswith(
+                    "token_embedding") or k.startswith("final_ln"):
+                # print(f"Removing key {k} from pretrained checkpoint")
+                del model_ckpt[k]
 
+        model.decoder.load_state_dict(
+            model_ckpt, strict=True)
+
+    if args.encoder_path:
+        print('loading encoder')
+        encoder_ckpt = dist_util.load_state_dict(args.encoder_path, map_location="cpu")
+        model.encoder.load_state_dict(
+            encoder_ckpt, strict=True)
+
+    model.to(dist_util.dev())
+
+    # # Handle the repository creation
+    # if accelerator.is_main_process:
+    #     if args.push_to_hub:
+    #         if args.hub_model_id is None:
+    #             repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
+    #         else:
+    #             repo_name = args.hub_model_id
+    #         repo = Repository(args.output_dir, clone_from=repo_name)
+    #
+    #         with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
+    #             if "step_*" not in gitignore:
+    #                 gitignore.write("step_*\n")
+    #             if "epoch_*" not in gitignore:
+    #                 gitignore.write("epoch_*\n")
+    #     elif args.output_dir is not None:
+    #         os.makedirs(args.output_dir, exist_ok=True)
+
+    logger.log("creating data loader...")
     # Load models and create wrapper for stable diffusion
+
+    all_files = _list_image_files_recursively(args.data_dir)
+    random.shuffle(all_files)
+    split_indx = int(len(all_files) * args.train_ratio) + 1
+    train_files = all_files[:split_indx]
+    val_files = all_files[split_indx:]
+    metadata_file = os.path.join(args.data_dir, 'metadata.jsonl')
+
+    train_dataloader = load_data_sketch(
+        all_files=train_files,
+        metadata_file=metadata_file,
+        batch_size=args.train_batch_size,
+        image_size=args.resolution,
+        train=True,
+        low_res=args.super_res,
+        uncond_p=args.uncond_p,
+        mode=args.mode,
+        random_crop=True,
+    )
+
+    val_dataloader = load_data_sketch(
+        all_files=val_files,
+        metadata_file=metadata_file,
+        batch_size=args.train_batch_size // 2,
+        image_size=args.resolution,
+        train=False,
+        deterministic=True,
+        low_res=args.super_res,
+        uncond_p=0.,
+        mode=args.mode,
+        random_crop=False,
+    )
+
     tokenizer = CLIPTokenizer.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
     )
@@ -405,7 +492,8 @@ def main():
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            # args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * os.environ['WORLD_SIZE']
         )
 
     # Initialize the optimizer
@@ -433,55 +521,73 @@ def main():
     # Get the datasets: you can either provide your own training and evaluation files (see below)
     # or specify a Dataset from the hub (the dataset will be downloaded automatically from the datasets Hub).
 
-    # In distributed training, the load_dataset function guarantees that only one local process can concurrently
-    # download the dataset.
-    if args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
-            cache_dir=args.cache_dir,
-        )
-    else:
-        data_files = {}
-        if args.train_data_dir is not None:
-            data_files["train"] = os.path.join(args.train_data_dir, "**")
-        dataset = load_dataset(
-            "imagefolder",
-            data_files=data_files,
-            cache_dir=args.cache_dir,
-        )
-        # See more about loading custom images at
-        # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
-
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
-    column_names = dataset["train"].column_names
-
-    # 6. Get the column names for input/target.
-    dataset_columns = dataset_name_mapping.get(args.dataset_name, None)
-    if args.image_column is None:
-        image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
-    else:
-        image_column = args.image_column
-        if image_column not in column_names:
-            raise ValueError(
-                f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
-            )
-    if args.caption_column is None:
-        caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
-    else:
-        caption_column = args.caption_column
-        if caption_column not in column_names:
-            raise ValueError(
-                f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
-            )
+    # # In distributed training, the load_dataset function guarantees that only one local process can concurrently
+    # # download the dataset.
+    # if args.dataset_name is not None:
+    #     # Downloading and loading a dataset from the hub.
+    #     dataset = load_dataset(
+    #         args.dataset_name,
+    #         args.dataset_config_name,
+    #         cache_dir=args.cache_dir,
+    #     )
+    # else:
+    #     data_files = {}
+    #     if args.train_data_dir is not None:
+    #         data_files["train"] = os.path.join(args.train_data_dir, "**")
+    #     dataset = load_dataset(
+    #         "imagefolder",
+    #         data_files=data_files,
+    #         cache_dir=args.cache_dir,
+    #     )
+    #     # See more about loading custom images at
+    #     # https://huggingface.co/docs/datasets/v2.4.0/en/image_load#imagefolder
+    #
+    # # Preprocessing the datasets.
+    # # We need to tokenize inputs and targets.
+    # column_names = dataset["train"].column_names
+    #
+    # # 6. Get the column names for input/target.
+    # if args.dataset_name is not None:
+    #     dataset_name_mapping = {"lambdalabs/pokemon-blip-captions": ("image", "text"), }
+    #     dataset_columns = dataset_name_mapping.get(args.dataset_name, None)
+    # if args.image_column is None:
+    #     image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+    # else:
+    #     image_column = args.image_column
+    #     if image_column not in column_names:
+    #         raise ValueError(
+    #             f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
+    #         )
+    # if args.caption_column is None:
+    #     caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+    # else:
+    #     caption_column = args.caption_column
+    #     if caption_column not in column_names:
+    #         raise ValueError(
+    #             f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
+    #         )
 
     # Preprocessing the datasets.
     # We need to tokenize input captions and transform the images.
-    def tokenize_captions(examples, is_train=True):
+    # def tokenize_captions(examples, is_train=True):
+    #     captions = []
+    #     for caption in examples[caption_column]:
+    #         if isinstance(caption, str):
+    #             captions.append(caption)
+    #         elif isinstance(caption, (list, np.ndarray)):
+    #             # take a random caption if there are multiple
+    #             captions.append(random.choice(caption) if is_train else caption[0])
+    #         else:
+    #             raise ValueError(
+    #                 f"Caption column `{caption_column}` should contain either strings or lists of strings."
+    #             )
+    #     inputs = tokenizer(captions, max_length=tokenizer.model_max_length, padding="do_not_pad", truncation=True)
+    #     input_ids = inputs.input_ids
+    #     return input_ids
+
+    def tokenize_captions(captions, is_train=True):
         captions = []
-        for caption in examples[caption_column]:
+        for caption in captions:
             if isinstance(caption, str):
                 captions.append(caption)
             elif isinstance(caption, (list, np.ndarray)):
@@ -489,34 +595,34 @@ def main():
                 captions.append(random.choice(caption) if is_train else caption[0])
             else:
                 raise ValueError(
-                    f"Caption column `{caption_column}` should contain either strings or lists of strings."
+                    f"{captions} should contain either strings or lists of strings."
                 )
         inputs = tokenizer(captions, max_length=tokenizer.model_max_length, padding="do_not_pad", truncation=True)
         input_ids = inputs.input_ids
         return input_ids
 
-    train_transforms = transforms.Compose(
-        [
-            transforms.Resize((args.resolution, args.resolution), interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
-            transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ]
-    )
-
-    def preprocess_train(examples):
-        images = [image.convert("RGB") for image in examples[image_column]]
-        examples["pixel_values"] = [train_transforms(image) for image in images]
-        examples["input_ids"] = tokenize_captions(examples)
-
-        return examples
-
-    with accelerator.main_process_first():
-        if args.max_train_samples is not None:
-            dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
-        # Set the training transforms
-        train_dataset = dataset["train"].with_transform(preprocess_train)
+    # train_transforms = transforms.Compose(
+    #     [
+    #         transforms.Resize((args.resolution, args.resolution), interpolation=transforms.InterpolationMode.BILINEAR),
+    #         transforms.CenterCrop(args.resolution) if args.center_crop else transforms.RandomCrop(args.resolution),
+    #         transforms.RandomHorizontalFlip() if args.random_flip else transforms.Lambda(lambda x: x),
+    #         transforms.ToTensor(),
+    #         transforms.Normalize([0.5], [0.5]),
+    #     ]
+    # )
+    #
+    # def preprocess_train(examples):
+    #     images = [image.convert("RGB") for image in examples[image_column]]
+    #     examples["pixel_values"] = [train_transforms(image) for image in images]
+    #     examples["input_ids"] = tokenize_captions(examples)
+    #
+    #     return examples
+    #
+    # with accelerator.main_process_first():
+    #     if args.max_train_samples is not None:
+    #         dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+    #     # Set the training transforms
+    #     train_dataset = dataset["train"].with_transform(preprocess_train)
 
     def collate_fn(examples):
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
@@ -529,10 +635,10 @@ def main():
             "attention_mask": padded_tokens.attention_mask,
         }
 
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=args.train_batch_size
-    )
-
+    # train_dataloader = torch.utils.data.DataLoader(
+    #     train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=args.train_batch_size
+    # )
+    #
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -547,22 +653,27 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
-    )
-    accelerator.register_for_checkpointing(lr_scheduler)
+    # unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+    #     unet, optimizer, train_dataloader, lr_scheduler
+    # )
+
+    # accelerator.register_for_checkpointing(lr_scheduler)
 
     weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
+    # if accelerator.mixed_precision == "fp16":
+    if args.mixed_precision == "fp16":
         weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
+    # elif accelerator.mixed_precision == "bf16":
+    elif args.mixed_precision == "bf16":
         weight_dtype = torch.bfloat16
 
     # Move text_encode and vae to gpu.
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
     # as these models are only used for inference, keeping weights in full precision is not required.
-    text_encoder.to(accelerator.device, dtype=weight_dtype)
-    vae.to(accelerator.device, dtype=weight_dtype)
+    # text_encoder.to(accelerator.device, dtype=weight_dtype)
+    text_encoder.to(dist_util.dev(), dtype=weight_dtype)
+    # vae.to(accelerator.device, dtype=weight_dtype)
+    vae.to(dist_util.dev(), dtype=weight_dtype)
 
     # Create EMA for the unet.
     if args.use_ema:
@@ -577,14 +688,15 @@ def main():
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
-    if accelerator.is_main_process:
-        accelerator.init_trackers("text2image-fine-tune", config=vars(args))
+    # if accelerator.is_main_process:
+    #     accelerator.init_trackers("text2image-fine-tune", config=vars(args))
 
     # Train!
-    total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    # total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = args.train_batch_size * os.environ['WORLD_SIZE'] * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
+    logger.info(f"  Num examples = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -593,25 +705,26 @@ def main():
     global_step = 0
     first_epoch = 0
 
-    if args.resume_from_checkpoint:
-        if args.resume_from_checkpoint != "latest":
-            path = os.path.basename(args.resume_from_checkpoint)
-        else:
-            # Get the most recent checkpoint
-            dirs = os.listdir(args.output_dir)
-            dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
-            path = dirs[-1]
-        accelerator.print(f"Resuming from checkpoint {path}")
-        accelerator.load_state(os.path.join(args.output_dir, path))
-        global_step = int(path.split("-")[1])
-
-        resume_global_step = global_step * args.gradient_accumulation_steps
-        first_epoch = resume_global_step // num_update_steps_per_epoch
-        resume_step = resume_global_step % num_update_steps_per_epoch
+    # if args.resume_from_checkpoint:
+    #     if args.resume_from_checkpoint != "latest":
+    #         path = os.path.basename(args.resume_from_checkpoint)
+    #     else:
+    #         # Get the most recent checkpoint
+    #         dirs = os.listdir(args.output_dir)
+    #         dirs = [d for d in dirs if d.startswith("checkpoint")]
+    #         dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+    #         path = dirs[-1]
+    #     accelerator.print(f"Resuming from checkpoint {path}")
+    #     accelerator.load_state(os.path.join(args.output_dir, path))
+    #     global_step = int(path.split("-")[1])
+    #
+    #     resume_global_step = global_step * args.gradient_accumulation_steps
+    #     first_epoch = resume_global_step // num_update_steps_per_epoch
+    #     resume_step = resume_global_step % num_update_steps_per_epoch
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
+    # progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(global_step, args.max_train_steps), disable=dist_util.get_rank()!= 0)
     progress_bar.set_description("Steps")
 
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -669,7 +782,7 @@ def main():
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
-                if args.use_ema: # at this point memory is released for gradient_accumulation_steps
+                if args.use_ema: # at this point (after ema step) memory is released for gradient_accumulation_steps
                     ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
