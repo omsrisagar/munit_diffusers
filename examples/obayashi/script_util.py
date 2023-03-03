@@ -1,5 +1,6 @@
 import argparse
 import inspect
+import os.path
 
 import gaussian_diffusion as gd
 from respace import SpacedDiffusion, space_timesteps
@@ -9,6 +10,7 @@ from respace import SpacedDiffusion, space_timesteps
 # )
 from networks import Sketch2Im_Model
 import torchvision.utils as vutils
+import torch
 
 
 def model_and_diffusion_defaults(super_res=0):
@@ -344,3 +346,10 @@ def write_2images(image_outputs, display_image_num, file_name):
     image_outputs = image_outputs.expand(-1, 3, -1, -1)  # expand gray-scale images to 3 channels
     image_grid = vutils.make_grid(image_outputs.data, nrow=display_image_num, padding=0, normalize=True)
     vutils.save_image(image_grid, file_name)
+
+def write_2images_onebyone(arr_orig, arr_ref, arr, prompt_dict, path):
+    for i in range(len(arr_orig)):
+        image_outputs = torch.vstack([arr_orig[i:i+1], arr_ref[i:i+1], arr[i:i+1]]) #i : i+1 is needed to preserve dim
+        image_outputs = image_outputs.expand(-1, 3, -1, -1)  # expand gray-scale images to 3 channels
+        image_grid = vutils.make_grid(image_outputs.data, padding=0, normalize=True)
+        vutils.save_image(image_grid, os.path.join(path, prompt_dict[i]['file_name']))
