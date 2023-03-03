@@ -27,9 +27,10 @@ from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNe
 from transformers import CLIPTextModel, CLIPTokenizer
 from diffusers.utils.import_utils import is_xformers_available
 # sys.path.append("~/pycharm-professional/debug-eggs/pydevd-pycharm.egg")
-# import pydevd_pycharm
-# pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True,
-#                         stderrToServer=True)
+
+import pydevd_pycharm
+pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True,
+                        stderrToServer=True)
 
 
 def main():
@@ -85,7 +86,7 @@ def main():
         unet.enable_gradient_checkpointing()
 
 ##### scratch #####
-    if  args.model_path:
+    if args.model_path:
         print('loading decoder')
         model_ckpt = dist_util.load_state_dict(args.model_path, map_location="cpu")
 
@@ -140,10 +141,12 @@ def main():
         random_crop=True,
     )
 
+    eff_bs = max(1, args.batch_size // 2)
+    eff_bs = eff_bs * 1 if args.finetune_decoder else eff_bs  # for former eff_bs=1 without this; =1 after this
     val_data = load_data_sketch(
         all_files=val_files,
         text_dict=text_dict,
-        batch_size=max(1, args.batch_size // 2),
+        batch_size=eff_bs,
         image_size=args.image_size,
         train=False,
         deterministic=True,

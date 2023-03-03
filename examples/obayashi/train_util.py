@@ -310,11 +310,13 @@ class TrainLoop:
     def val(self, step):
         inner_model=self.ddp_model.module
         inner_model.eval()
-        # copy the current model params to be loaded later
-        model_params_copy = copy.deepcopy(self.master_params)
 
-        # load ema latest params as they are the stable params
-        self._load_params(self.ema_params[0])
+        # disabling the below ones as more memory is needed to save copies of params for U-net
+        # # copy the current model params to be loaded later
+        # model_params_copy = copy.deepcopy(self.master_params)
+        #
+        # # load ema latest params as they are the stable params
+        # self._load_params(self.ema_params[0])
 
         if dist.get_rank() == 0:
             print("sampling...")   
@@ -327,7 +329,8 @@ class TrainLoop:
         all_lowres_images = []
         all_cond_images = []
         all_orig_images = []
-        eff_bs = self.batch_size // 2
+        eff_bs = max(1, self.batch_size // 2)
+        eff_bs = eff_bs * 1 if self.finetune_decoder else eff_bs # for former eff_bs=1 without this; =1 after this
         num_samples = self.glide_options['num_samples']
         image_size = self.glide_options['image_size']
         img_disp_nrow = self.glide_options['img_disp_nrow']
@@ -355,10 +358,10 @@ class TrainLoop:
                 samples=sample(
                     glide_model=inner_model,
                     glide_options=self.glide_options,
-                    side_x=self.glide_options['image_size'] // self.vae_scale_factor,
-                    side_y=self.glide_options['image_size'] // self.vae_scale_factor,
+                    side_x=image_size // self.vae_scale_factor,
+                    side_y=image_size // self.vae_scale_factor,
                     prompt=model_kwargs,
-                    batch_size=max(1, self.glide_options['batch_size']//2),
+                    batch_size=eff_bs,
                     guidance_scale=guidance_scale,
                     device=dist_util.dev(),
                     prediction_respacing=self.glide_options['sample_respacing'],
@@ -436,8 +439,8 @@ class TrainLoop:
         #
         #     img_id += 1
 
-        # load latest model params
-        self._load_params(model_params_copy)
+        # # load latest model params
+        # self._load_params(model_params_copy)
         inner_model.train()
 
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.decode_latents
@@ -585,8 +588,10 @@ def find_resume_checkpoint(resume_checkpoint):
     if not resume_checkpoint:
         return None
     if "ROOT" in resume_checkpoint:
-        maybe_root=os.environ.get("AMLT_MAP_INPUT_DIR")
-        maybe_root="OUTPUT/log" if not maybe_root else maybe_root
+        # maybe_root=os.environ.get("AMLT_MAP_INPUT_DIR")
+        # maybe_root="OUTPUT/log" if not maybe_root else maybe_root
+        maybe_root=os.environ.get("ROOT")
+        maybe_root=os.environ.get("LOGDIR") if not maybe_root else maybe_root
         root=os.path.join(maybe_root,"checkpoints")
         resume_checkpoint=resume_checkpoint.replace("ROOT",root)
     if "LATEST" in resume_checkpoint:

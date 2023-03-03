@@ -139,7 +139,11 @@ class ImageDataset(Dataset):
         if self.mode == 'edge':
             # path = self.local_images[idx].replace('COCO-STUFF', 'COCO-Sketch')[:-4] + '.png'
             path = self.local_images[idx]
-            path2 = path.replace('train_img', 'train_sketch')
+            dirname = os.path.dirname(path)
+            basename = os.path.basename(path)
+            dirname2 = dirname.replace('_img', '_sketch', 1)
+            path2 = os.path.join(dirname2, basename)
+            assert os.path.exists(path2)
         # elif self.mode == 'flickr-edge':
         #     path = self.local_images[idx].replace('images', 'img256')[:-4] + '.png'
         #     path2 = path.replace('img256', 'sketch256')
