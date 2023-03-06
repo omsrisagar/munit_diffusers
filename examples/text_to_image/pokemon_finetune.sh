@@ -1,7 +1,7 @@
 export MODEL_NAME="CompVis/stable-diffusion-v1-4"
 export dataset_name="lambdalabs/pokemon-blip-captions"
 
-accelerate launch train_text_to_image.py \
+accelerate launch train_text_to_image_mycopy.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --dataset_name=$dataset_name \
   --use_ema \
