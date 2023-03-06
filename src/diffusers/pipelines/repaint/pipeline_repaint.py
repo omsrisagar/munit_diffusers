@@ -1,4 +1,4 @@
-# Copyright 2022 ETH Zurich Computer Vision Lab and The HuggingFace Team. All rights reserved.
+# Copyright 2023 ETH Zurich Computer Vision Lab and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,14 +16,13 @@
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
+import PIL
 import torch
 
-import PIL
-
 from ...models import UNet2DModel
-from ...pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from ...schedulers import RePaintScheduler
-from ...utils import PIL_INTERPOLATION, deprecate, logging
+from ...utils import PIL_INTERPOLATION, logging, randn_tensor
+from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -38,7 +37,7 @@ def _preprocess_image(image: Union[List, PIL.Image.Image, torch.Tensor]):
 
     if isinstance(image[0], PIL.Image.Image):
         w, h = image[0].size
-        w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+        w, h = map(lambda x: x - x % 8, (w, h))  # resize to integer multiple of 8
 
         image = [np.array(i.resize((w, h), resample=PIL_INTERPOLATION["lanczos"]))[None, :] for i in image]
         image = np.concatenate(image, axis=0)
@@ -88,10 +87,9 @@ class RePaintPipeline(DiffusionPipeline):
         eta: float = 0.0,
         jump_length: int = 10,
         jump_n_sample: int = 10,
-        generator: Optional[torch.Generator] = None,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
         r"""
         Args:
@@ -112,42 +110,44 @@ class RePaintPipeline(DiffusionPipeline):
                 The number of times we will make forward time jump for a given chosen time sample. Take a look at
                 Figure 9 and 10 in https://arxiv.org/pdf/2201.09865.pdf.
             generator (`torch.Generator`, *optional*):
-                A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
-                deterministic.
+                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
+                to make generation deterministic.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~pipeline_utils.ImagePipelineOutput`] instead of a plain tuple.
+                Whether or not to return a [`~pipelines.ImagePipelineOutput`] instead of a plain tuple.
 
         Returns:
-            [`~pipeline_utils.ImagePipelineOutput`] or `tuple`: [`~pipelines.utils.ImagePipelineOutput`] if
-            `return_dict` is True, otherwise a `tuple. When returning a tuple, the first element is a list with the
-            generated images.
+            [`~pipelines.ImagePipelineOutput`] or `tuple`: [`~pipelines.utils.ImagePipelineOutput`] if `return_dict` is
+            True, otherwise a `tuple. When returning a tuple, the first element is a list with the generated images.
         """
 
-        message = "Please use `image` instead of `original_image`."
-        original_image = deprecate("original_image", "0.15.0", message, take_from=kwargs)
-        original_image = original_image or image
+        original_image = image
 
         original_image = _preprocess_image(original_image)
         original_image = original_image.to(device=self.device, dtype=self.unet.dtype)
         mask_image = _preprocess_mask(mask_image)
         mask_image = mask_image.to(device=self.device, dtype=self.unet.dtype)
 
+        batch_size = original_image.shape[0]
+
         # sample gaussian noise to begin the loop
-        image = torch.randn(
-            original_image.shape,
-            generator=generator,
-            device=self.device,
-        )
-        image = image.to(device=self.device, dtype=self.unet.dtype)
+        if isinstance(generator, list) and len(generator) != batch_size:
+            raise ValueError(
+                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
+                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
+            )
+
+        image_shape = original_image.shape
+        image = randn_tensor(image_shape, generator=generator, device=self.device, dtype=self.unet.dtype)
 
         # set step values
         self.scheduler.set_timesteps(num_inference_steps, jump_length, jump_n_sample, self.device)
         self.scheduler.eta = eta
 
         t_last = self.scheduler.timesteps[0] + 1
+        generator = generator[0] if isinstance(generator, list) else generator
         for i, t in enumerate(self.progress_bar(self.scheduler.timesteps)):
             if t < t_last:
                 # predict the noise residual
